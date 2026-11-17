@@ -1,8 +1,8 @@
 # OuterSSH client starter for Linux
 
 A minimal GTK 4 + WebKitGTK browser built on [OuterSSH](https://outerssh.org).
-It connects to one SSH server, opens the server's homepage (Outer Shell by
-default), and has a box for opening any port on the server.
+It connects to one SSH server, opens the server's homepage (such as Outer Shell),
+and has a box for opening any port on the server.
 
 Start here to build your own SSH-aware browser on Linux. It's deliberately small:
 the configuration is code, and there are no settings, tabs, or bookmarks.
@@ -13,7 +13,8 @@ the configuration is code, and there are no settings, tabs, or bookmarks.
    HTTP proxy on a loopback port. The web view uses that proxy.
 2. Opens the server's homepage, if the server has one configured (see
    [Server-defined homepage](https://github.com/outergroup/OuterSSH/blob/main/OuterSSH/README.md#server-defined-homepage)).
-   Otherwise it opens Outer Shell, if it's running on the server.
+   Installing [Outer Shell](https://outershell.org) on a server makes it that
+   server's homepage, on Linux, macOS, and Windows.
 3. Typing a port number and pressing Enter opens `localhost:<port>` on the server.
    Pressing Enter in the empty box, or clicking Home, opens the homepage again.
 
@@ -32,13 +33,6 @@ sudo apt install build-essential cmake ninja-build pkg-config patch libssl-dev z
   libgtk-4-dev libwebkitgtk-6.0-dev
 ```
 
-Build OuterSSH's server-side helpers, which the app uploads to the server when it
-first opens a Unix socket such as Outer Shell's. This needs Docker:
-
-```sh
-OuterSSH/Scripts/build_outerssh_linux_helpers.sh helpers
-```
-
 Edit `src/config.h` with your server, user, and private key (or password). Then:
 
 ```sh
@@ -50,14 +44,24 @@ cmake --build build
 The first time it connects, the app prints the server's host key fingerprint.
 Paste it into `TRUSTED_HOST_KEY` so later connections only accept that key.
 
+### Server helpers
+
+OuterSSH uploads a small helper to the server when it first needs one, such as to
+open a Unix socket like Outer Shell's. Configuring the build downloads signed
+helpers for Linux, macOS, and Windows servers from outerssh.org into `helpers/`
+(git-ignored), checking each against `helpers.sha256`. To use helpers you build
+yourself (see `OuterSSH/Release/README.md`), put them in `helpers/` and their
+hashes in `helpers.sha256`; the build only downloads files whose hash doesn't
+match.
+
 ## Where to look
 
 Everything is in `src/main.c`:
 
 - `connect_to_server` creates the OuterSSH session pool and HTTP proxy.
 - `handle_event` answers OuterSSH's events and questions, on the GLib main loop.
-- `go_home`, `homepage_received`, `outer_shell_found` and
-  `proxy_url_for_homepage` choose the first page.
+- `go_home`, `homepage_received` and `proxy_url_for_homepage` open the server's
+  homepage.
 - `provide_helper` answers OuterSSH's request for its server-side helper.
 - `authenticate_proxy` gives WebKit the proxy's credentials.
 - `create_content_manager` adds OuterSSH's script that shows Unix socket paths in
@@ -65,8 +69,5 @@ Everything is in `src/main.c`:
 
 ## Limitations
 
-- Opens Outer Shell only on Linux servers. The app bundles only the Linux helpers;
-  macOS and Windows servers need their own helper builds for Outer Shell's launchd
-  socket or named pipe.
 - Root-owned sockets need `sudo`, which the app declines.
-- Supports `http+unix://` and `http://localhost` homepages only.
+- Supports `http+unix://`, `http+pipe://` and `http://localhost` homepages only.

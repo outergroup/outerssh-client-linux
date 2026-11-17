@@ -3,18 +3,14 @@
 #include <OuterSSH/OuterSSH.h>
 #include <OuterSSH/SSHProxyAddress.h>
 #include <fcntl.h>
+#include <string.h>
 #include <glib-unix.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 
-enum { TAG_PROXY_STARTED = 1, TAG_HOMEPAGE, TAG_FIND_OUTER_SHELL, TAG_DESTROY };
-
-static const char find_outer_shell[] =
-    "if [ \"$(id -u)\" = 0 ]; then d=/run; else d=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; fi; "
-    "p=\"$d/org.outershell.OuterShell\"; [ -S \"$p\" ] && printf '%s' \"$p\"";
-static const char outer_shell_suffix[] = "/org.outershell.OuterShell";
+enum { TAG_PROXY_STARTED = 1, TAG_HOMEPAGE, TAG_DESTROY };
 
 typedef struct {
     GtkApplication *application;
@@ -65,20 +61,23 @@ static void go_home(App *app)
 }
 
 /* Turns a server homepage into a URL the web view can load through OuterSSH's
- * proxy. This starter supports http+unix sockets and http://localhost. */
+ * proxy. This starter supports http+unix sockets, http+pipe named pipes, and
+ * http://localhost. */
 static char *proxy_url_for_homepage(const char *url)
 {
-    static const char unix_scheme[] = "http+unix://";
+    static const char unix_scheme[] = "http+unix://", pipe_scheme[] = "http+pipe://";
     char host[OUTERSSH_PROXY_SOCKET_HOST_CAPACITY];
     size_t host_length;
-    if (!g_ascii_strncasecmp(url, unix_scheme, sizeof(unix_scheme) - 1)) {
+    gboolean unix_socket = !g_ascii_strncasecmp(url, unix_scheme, sizeof(unix_scheme) - 1);
+    if (unix_socket || !g_ascii_strncasecmp(url, pipe_scheme, sizeof(pipe_scheme) - 1)) {
         const char *authority = url + sizeof(unix_scheme) - 1;
         size_t authority_length = strcspn(authority, "/?#");
         char *encoded = g_strndup(authority, authority_length);
         char *path = g_uri_unescape_string(encoded, NULL);
         g_free(encoded);
-        gboolean ok = path && path[0] == '/' &&
-            outerssh_proxy_encode_unix_socket_host(path, strlen(path), host, sizeof(host), &host_length);
+        gboolean ok = path && (unix_socket
+            ? outerssh_proxy_encode_unix_socket_host(path, strlen(path), host, sizeof(host), &host_length)
+            : outerssh_proxy_encode_named_pipe_host(path, strlen(path), host, sizeof(host), &host_length));
         g_free(path);
         if (!ok) return NULL;
         const char *rest = authority + authority_length;
@@ -105,9 +104,7 @@ static void homepage_received(App *app, const OuterSSHEvent *event)
         return;
     }
     if (!event->homepage_received.found) {
-        if (!outerssh_session_pool_execute_command(app->pool, find_outer_shell, sizeof(find_outer_shell) - 1,
-                NULL, 0, TAG_FIND_OUTER_SHELL))
-            show_status(app, "Could not look for Outer Shell.");
+        show_status(app, "This server has no homepage. Type a port to open one of its web servers.");
         return;
     }
     char *url = g_strndup(event->homepage_received.url, event->homepage_received.url_length);
@@ -120,28 +117,6 @@ static void homepage_received(App *app, const OuterSSHEvent *event)
         g_free(message);
     }
     g_free(proxy_url);
-    g_free(url);
-}
-
-static void outer_shell_found(App *app, const OuterSSHEvent *event)
-{
-    if (event->command_completed.error.domain != OUTERSSH_ERROR_NONE) {
-        show_error(app, "Could not look for Outer Shell", event->command_completed.error);
-        return;
-    }
-    const char *path = (const char *)event->command_completed.standard_output;
-    size_t length = event->command_completed.standard_output_length;
-    char host[OUTERSSH_PROXY_SOCKET_HOST_CAPACITY];
-    size_t host_length;
-    if (event->command_completed.exit_status != 0 || length <= sizeof(outer_shell_suffix) - 1 ||
-        path[0] != '/' || memcmp(path + length - (sizeof(outer_shell_suffix) - 1), outer_shell_suffix,
-            sizeof(outer_shell_suffix) - 1) != 0 ||
-        !outerssh_proxy_encode_unix_socket_host(path, length, host, sizeof(host), &host_length)) {
-        show_status(app, "Outer Shell isn't running on this server.");
-        return;
-    }
-    char *url = g_strconcat("http://", host, "/", NULL);
-    load(app, url);
     g_free(url);
 }
 
@@ -167,12 +142,14 @@ static void proxy_started(App *app, const OuterSSHEvent *event)
     }
 }
 
-/* Answers OuterSSH's request for its server-side helper with a file built by
- * OuterSSH/Scripts/build_outerssh_linux_helpers.sh. */
+/* Answers OuterSSH's request for its server-side helper with a file the build
+ * downloaded. Windows helpers are tar archives. */
 static void provide_helper(App *app, const OuterSSHEvent *event)
 {
-    char *path = g_strdup_printf("%s/outerssh-helper-%.*s.gz", HELPER_DIRECTORY,
-        (int)event->helper_binary_needed.platform_length, event->helper_binary_needed.platform);
+    const char *platform = event->helper_binary_needed.platform;
+    int length = (int)event->helper_binary_needed.platform_length;
+    const char *extension = length >= 8 && strncmp(platform, "windows-", 8) == 0 ? ".tar.gz" : ".gz";
+    char *path = g_strdup_printf("%s/outerssh-helper-%.*s%s", HELPER_DIRECTORY, length, platform, extension);
     int file = open(path, O_RDONLY | O_CLOEXEC);
     struct stat status;
     if (file >= 0 && fstat(file, &status) == 0) {
@@ -202,9 +179,6 @@ static void handle_event(App *app, const OuterSSHEvent *event)
         break;
     case OUTERSSH_EVENT_HOMEPAGE_RECEIVED:
         homepage_received(app, event);
-        break;
-    case OUTERSSH_EVENT_COMMAND_COMPLETED:
-        if (event->tag == TAG_FIND_OUTER_SHELL) outer_shell_found(app, event);
         break;
     case OUTERSSH_EVENT_HOST_KEY_VALIDATION:
         g_print("Trusting host key %.*s. To pin it, set TRUSTED_HOST_KEY in config.h.\n",
